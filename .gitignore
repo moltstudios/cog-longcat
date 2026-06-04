@@ -1,0 +1,6 @@
+longcat-source/
+__pycache__/
+*.pyc
+.git
+weights/
+outputs/
