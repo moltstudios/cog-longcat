@@ -19,8 +19,12 @@ jobs:
         uses: replicate/setup-cog@v2
         with:
           cog-version: "v0.20.0"
-          token: ${{ secrets.REPLICATE_CLI_AUTH_TOKEN }}
 
-      - name: Push to Replicate
+      - name: Login to Replicate registry
         run: |
-          cog push r8.im/moltstudios/longcat-avatar
+          echo "${{ secrets.REPLICATE_API_TOKEN }}" | docker login r8.im -u moltstudios --password-stdin
+
+      - name: Build and push
+        run: |
+          cog build -t r8.im/moltstudios/longcat-avatar
+          docker push r8.im/moltstudios/longcat-avatar
