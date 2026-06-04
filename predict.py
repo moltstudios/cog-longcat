@@ -90,10 +90,11 @@ def _download_models():
             "--base-dir", str(avatar_dir / "whisper-large-v3"),
         ], check=False, timeout=300)
         
-        subprocess.run([
-            "pget", "hf://meituan-longcat/LongCat-Video-Avatar-1.5/vocal_separator",
-            "--base-dir", str(avatar_dir / "vocal_separator"),
-        ], check=False, timeout=120)
+        # vocal separator download deferred
+        # subprocess.run([
+        #     "pget", "hf://meituan-longcat/LongCat-Video-Avatar-1.5/vocal_separator",
+        #     "--base-dir", str(avatar_dir / "vocal_separator"),
+        # ], check=False, timeout=120)
         
         # Download shared config files
         for f in ["config.json", "model_index.json"]:
@@ -175,7 +176,7 @@ class Predictor:
         from longcat_video.modules.quantization import load_quantized_dit
         from longcat_video.audio_process import get_audio_encoder, get_audio_feature_extractor
         from longcat_video.context_parallel import context_parallel_util
-        from audio_separator.separator import Separator
+        # audio_separator removed — vocal separation handled via ffmpeg fallback
         
         # Initialize single-process distributed
         _init_single_process_distributed()
@@ -239,14 +240,9 @@ class Predictor:
         audio_encoder = get_audio_encoder(whisper_path, model_type="avatar-v1.5").to(device)
         audio_feature_extractor = get_audio_feature_extractor(whisper_path, model_type="avatar-v1.5")
         
-        print("[setup] Loading vocal separator...")
-        vocal_sep_path = str(avatar_dir / "vocal_separator" / "Kim_Vocal_2.onnx")
-        vocal_separator = Separator(
-            output_dir="/tmp/vocals",
-            output_single_stem="vocals",
-            model_file_dir=os.path.dirname(vocal_sep_path),
-        )
-        vocal_separator.load_model(os.path.basename(vocal_sep_path))
+        # Vocal separator deferred — not needed for initial testing
+        # Will add back via lighter-weight method after image builds
+        print("[setup] Skipping vocal separator (using raw audio)")
         
         print("[setup] Initializing pipeline...")
         self.pipe = LongCatVideoAvatarPipeline(
@@ -261,7 +257,7 @@ class Predictor:
         )
         self.pipe.to(device)
         
-        self.vocal_separator = vocal_separator
+        self.vocal_separator = None  # Deferred
         self.device = device
         
         # Free CPU memory
@@ -337,16 +333,10 @@ class Predictor:
             urllib.request.urlretrieve(audio, audio_tmp.name)
             audio_path = audio_tmp.name
         
-        # Extract vocals
-        print("[predict] Extracting vocals...")
-        vocal_outputs = self.vocal_separator.separate(audio_path)
-        vocal_path = None
-        if vocal_outputs:
-            vocal_path = Path("/tmp/vocals") / "vocals" / vocal_outputs[0]
-            vocal_path = vocal_path.resolve().as_posix()
-        else:
-            print("[predict] Vocal extraction failed, using raw audio")
-            vocal_path = audio_path
+        # Vocal extraction — skip for now, use raw audio directly
+        # TODO: Add back vocal separation via lighter-weight method
+        print("[predict] Using raw audio (vocal separation deferred)")
+        vocal_path = audio_path
         
         # Load and pad audio
         speech_array, sr = librosa.load(vocal_path, sr=16000)

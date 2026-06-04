@@ -1,6 +1,4 @@
-longcat-source/
+.cog/
 __pycache__/
 *.pyc
-.git
-weights/
-outputs/
+.DS_Store
