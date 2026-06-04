@@ -27,8 +27,5 @@ build:
   run:
     - apt-get update && apt-get install -y libgl1-mesa-glx libglib2.0-0 ffmpeg || true
     - pip install flash-attn==2.7.4.post1 --no-build-isolation
-    - curl -o /usr/local/bin/pget -L "https://github.com/replicate/pget/releases/latest/download/pget_$(uname -s)_$(uname -m)" && chmod +x /usr/local/bin/pget
-    - python3 -c "from huggingface_hub import snapshot_download; snapshot_download('meituan-longcat/LongCat-Video-Avatar-1.5', local_dir='/opt/models/longcat/LongCat-Video-Avatar-1.5', allow_patterns=['base_model_int8/*','lora/*','whisper-large-v3/model.safetensors','whisper-large-v3/config.json','whisper-large-v3/generation_config.json','whisper-large-v3/merges.txt','whisper-large-v3/normalizer.json','whisper-large-v3/preprocessor_config.json','whisper-large-v3/special_tokens_map.json','whisper-large-v3/tokenizer.json','whisper-large-v3/tokenizer_config.json','whisper-large-v3/vocab.json','whisper-large-v3/added_tokens.json','scheduler/*','config.json','model_index.json'])"
-    - python3 -c "from huggingface_hub import snapshot_download; snapshot_download('meituan-longcat/LongCat-Video', local_dir='/opt/models/longcat/LongCat-Video', allow_patterns=['text_encoder/*','vae/*','tokenizer/*','scheduler/*','config.json','model_index.json'])"
 
 predict: "predict.py:Predictor"
