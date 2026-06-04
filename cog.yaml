@@ -3,10 +3,6 @@
 
 build:
   gpu: true
-  system:
-    - libgl1-mesa-glx
-    - libglib2.0-0
-    - ffmpeg
   python_version: "3.12"
   python_packages:
     - "torch==2.6.0"
@@ -28,6 +24,7 @@ build:
     - "huggingface_hub==0.34.0"
     - "accelerate==1.7.0"
   run:
+    - apt-get update && apt-get install -y libgl1-mesa-glx libglib2.0-0 ffmpeg || true
     - pip install flash-attn==2.7.4.post1 --no-build-isolation
 
 predict: "predict.py:Predictor"
