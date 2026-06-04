@@ -58,85 +58,23 @@ def _init_single_process_distributed():
 MODELS_DIR = Path(os.environ.get("LONGCAT_WEIGHTS_DIR", "/opt/models/longcat"))
 
 def _download_models():
-    """Download all model files from HuggingFace using pget or huggingface_hub."""
+    """Verify model files exist (pre-downloaded during Docker build)."""
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     
     avatar_dir = MODELS_DIR / "LongCat-Video-Avatar-1.5"
     base_dir = MODELS_DIR / "LongCat-Video"
     
-    # Check if models already downloaded
-    if (avatar_dir / "base_model_int8" / "quantized_model.safetensors.index.json").exists():
-        print("[download] Models already cached, skipping download")
+    # Check if models exist from build-time download
+    if (avatar_dir / "base_model_int8").exists():
+        print("[setup] Models found from build-time download")
         return avatar_dir, base_dir
     
-    print("[download] Starting model download...")
+    # Fallback: download at runtime if not baked in
+    print("[setup] Models not found, downloading at runtime (slow)...")
     t0 = time.time()
-    
-    # Try pget first (fast, parallel)
-    try:
-        # Download Avatar 1.5 model files (INT8 + LoRA + Whisper + Vocal separator)
-        subprocess.run([
-            "pget", "hf://meituan-longcat/LongCat-Video-Avatar-1.5/base_model_int8",
-            "--base-dir", str(avatar_dir / "base_model_int8"),
-        ], check=False, timeout=600)
-        
-        subprocess.run([
-            "pget", "hf://meituan-longcat/LongCat-Video-Avatar-1.5/lora",
-            "--base-dir", str(avatar_dir / "lora"),
-        ], check=False, timeout=300)
-        
-        subprocess.run([
-            "pget", "hf://meituan-longcat/LongCat-Video-Avatar-1.5/whisper-large-v3",
-            "--base-dir", str(avatar_dir / "whisper-large-v3"),
-        ], check=False, timeout=300)
-        
-        # vocal separator download deferred
-        # subprocess.run([
-        #     "pget", "hf://meituan-longcat/LongCat-Video-Avatar-1.5/vocal_separator",
-        #     "--base-dir", str(avatar_dir / "vocal_separator"),
-        # ], check=False, timeout=120)
-        
-        # Download shared config files
-        for f in ["config.json", "model_index.json"]:
-            subprocess.run([
-                "pget", f"hf://meituan-longcat/LongCat-Video-Avatar-1.5/{f}",
-                "--base-dir", str(avatar_dir),
-            ], check=False, timeout=30)
-        
-        # Scheduler config
-        subprocess.run([
-            "pget", "hf://meituan-longcat/LongCat-Video-Avatar-1.5/scheduler",
-            "--base-dir", str(avatar_dir / "scheduler"),
-        ], check=False, timeout=30)
-        
-        # Download base LongCat-Video components (text_encoder, vae, tokenizer)
-        subprocess.run([
-            "pget", "hf://meituan-longcat/LongCat-Video/text_encoder",
-            "--base-dir", str(base_dir / "text_encoder"),
-        ], check=False, timeout=600)
-        
-        subprocess.run([
-            "pget", "hf://meituan-longcat/LongCat-Video/vae",
-            "--base-dir", str(base_dir / "vae"),
-        ], check=False, timeout=120)
-        
-        subprocess.run([
-            "pget", "hf://meituan-longcat/LongCat-Video/tokenizer",
-            "--base-dir", str(base_dir / "tokenizer"),
-        ], check=False, timeout=60)
-        
-        subprocess.run([
-            "pget", "hf://meituan-longcat/LongCat-Video/scheduler",
-            "--base-dir", str(base_dir / "scheduler"),
-        ], check=False, timeout=30)
-        
-    except (subprocess.CalledProcessError, FileNotFoundError) as e:
-        print(f"[download] pget failed ({e}), falling back to huggingface_hub...")
-        _download_with_hf_hub(avatar_dir, base_dir)
-    
+    _download_with_hf_hub(avatar_dir, base_dir)
     elapsed = time.time() - t0
-    print(f"[download] Complete in {elapsed:.0f}s")
-    
+    print(f"[setup] Download complete in {elapsed:.0f}s")
     return avatar_dir, base_dir
 
 
