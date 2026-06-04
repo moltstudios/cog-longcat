@@ -58,24 +58,73 @@ def _init_single_process_distributed():
 MODELS_DIR = Path(os.environ.get("LONGCAT_WEIGHTS_DIR", "/opt/models/longcat"))
 
 def _download_models():
-    """Verify model files exist (pre-downloaded during Docker build)."""
+    """Download model files using pget (fast) or huggingface_hub (fallback)."""
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     
     avatar_dir = MODELS_DIR / "LongCat-Video-Avatar-1.5"
     base_dir = MODELS_DIR / "LongCat-Video"
     
-    # Check if models exist from build-time download
-    if (avatar_dir / "base_model_int8").exists():
-        print("[setup] Models found from build-time download")
+    # Quick check: if int8 model exists, skip download
+    int8_marker = avatar_dir / "base_model_int8" / "quantized_model.safetensors.index.json"
+    if int8_marker.exists():
+        print("[setup] Models already cached, skipping download")
         return avatar_dir, base_dir
     
-    # Fallback: download at runtime if not baked in
-    print("[setup] Models not found, downloading at runtime (slow)...")
+    print("[setup] Starting model download (this is a large model, ~40GB)...")
+    print("[setup] Downloading to:", MODELS_DIR)
     t0 = time.time()
+    
+    # Try pget first (fast, parallel downloads)
+    pget_available = os.path.isfile("/usr/local/bin/pget")
+    if pget_available:
+        print("[setup] Using pget for fast parallel download...")
+        try:
+            _download_with_pget(avatar_dir, base_dir)
+            elapsed = time.time() - t0
+            print(f"[setup] pget download complete in {elapsed:.0f}s")
+            return avatar_dir, base_dir
+        except Exception as e:
+            print(f"[setup] pget failed: {e}, falling back to huggingface_hub...")
+    else:
+        print("[setup] pget not available, using huggingface_hub...")
+    
+    # Fallback: huggingface_hub
     _download_with_hf_hub(avatar_dir, base_dir)
     elapsed = time.time() - t0
     print(f"[setup] Download complete in {elapsed:.0f}s")
     return avatar_dir, base_dir
+
+
+def _download_with_pget(avatar_dir, base_dir):
+    """Download using pget (Replicate's fast parallel downloader)."""
+    import subprocess
+    
+    def run_pget(url, dest, timeout=600):
+        print(f"[setup] Downloading {url} → {dest}")
+        result = subprocess.run(
+            ["pget", url, "--base-dir", str(dest)],
+            capture_output=True, text=True, timeout=timeout
+        )
+        if result.returncode != 0:
+            print(f"[setup] pget stderr: {result.stderr}")
+            raise RuntimeError(f"pget failed: {result.stderr}")
+        print(f"[setup] ✓ {url} complete")
+    
+    # Avatar 1.5 components
+    run_pget("hf://meituan-longcat/LongCat-Video-Avatar-1.5/base_model_int8", avatar_dir / "base_model_int8", timeout=600)
+    run_pget("hf://meituan-longcat/LongCat-Video-Avatar-1.5/lora", avatar_dir / "lora", timeout=300)
+    run_pget("hf://meituan-longcat/LongCat-Video-Avatar-1.5/whisper-large-v3", avatar_dir / "whisper-large-v3", timeout=300)
+    
+    # Config files
+    for f in ["config.json", "model_index.json"]:
+        run_pget(f"hf://meituan-longcat/LongCat-Video-Avatar-1.5/{f}", avatar_dir, timeout=30)
+    run_pget("hf://meituan-longcat/LongCat-Video-Avatar-1.5/scheduler", avatar_dir / "scheduler", timeout=30)
+    
+    # Base model components
+    run_pget("hf://meituan-longcat/LongCat-Video/text_encoder", base_dir / "text_encoder", timeout=600)
+    run_pget("hf://meituan-longcat/LongCat-Video/vae", base_dir / "vae", timeout=120)
+    run_pget("hf://meituan-longcat/LongCat-Video/tokenizer", base_dir / "tokenizer", timeout=60)
+    run_pget("hf://meituan-longcat/LongCat-Video/scheduler", base_dir / "scheduler", timeout=30)
 
 
 def _download_with_hf_hub(avatar_dir, base_dir):

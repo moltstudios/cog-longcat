@@ -27,6 +27,6 @@ build:
   run:
     - apt-get update && apt-get install -y libgl1-mesa-glx libglib2.0-0 ffmpeg || true
     - pip install flash-attn==2.7.4.post1 --no-build-isolation
-    - python3 download_models.py
+    - curl -o /usr/local/bin/pget -L "https://github.com/replicate/pget/releases/latest/download/pget_$(uname -s)_$(uname -m)" && chmod +x /usr/local/bin/pget
 
 predict: "predict.py:Predictor"
