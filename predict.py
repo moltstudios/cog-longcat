@@ -27,6 +27,11 @@ import librosa
 # Enable fast parallel downloads
 os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
 
+# Print startup diagnostics
+print(f"[startup] Python: {sys.version}")
+print(f"[startup] CWD: {os.getcwd()}")
+print(f"[startup] Files: {os.listdir('/src')}")
+
 # ---------------------------------------------------------------------------
 # Single-process distributed init shim
 # ---------------------------------------------------------------------------

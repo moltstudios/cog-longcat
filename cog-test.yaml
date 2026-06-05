@@ -1,0 +1,13 @@
+# LongCat-Video-Avatar-1.5 Cog Deployment — TEST VERSION
+# Minimal predictor to validate container startup
+
+build:
+  gpu: true
+  cuda: "12.6"
+  python_version: "3.12"
+  python_packages:
+    - "torch==2.6.0"
+  run:
+    - pip install flash-attn==2.7.4.post1 --no-build-isolation || true
+
+predict: "test_predict.py:Predictor"
