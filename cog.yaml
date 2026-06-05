@@ -24,7 +24,7 @@ build:
     - "regex==2024.11.6"
     - "huggingface_hub==0.34.0"
     - "accelerate==1.7.0"
-    - "hf_transfer==0.1.16"
+    - "hf_transfer==0.1.9"
   run:
     - pip install flash-attn==2.7.4.post1 --no-build-isolation
 
