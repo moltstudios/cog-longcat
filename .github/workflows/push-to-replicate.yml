@@ -35,7 +35,7 @@ jobs:
         run: |
           echo "=== Disk space before build ==="
           df -h /
-          cog build -t r8.im/moltstudios/longcat-avatar
+          cog build -t r8.im/moltstudios/longcat-test-minimal
           echo "=== Disk space after build ==="
           df -h /
-          docker push r8.im/moltstudios/longcat-avatar
+          docker push r8.im/moltstudios/longcat-test-minimal
