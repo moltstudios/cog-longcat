@@ -11,26 +11,60 @@ import os
 import sys
 import json
 import time
-import math
-import datetime
-import tempfile
 import subprocess
 from pathlib import Path
 from typing import Optional
 
-import numpy as np
 import torch
-import torch.distributed as dist
-import PIL.Image
-import librosa
-
-# Enable fast parallel downloads
-os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
 
 # Print startup diagnostics
 print(f"[startup] Python: {sys.version}")
 print(f"[startup] CWD: {os.getcwd()}")
-print(f"[startup] Files: {os.listdir('/src')}")
+print(f"[startup] PyTorch: {torch.__version__}")
+print(f"[startup] CUDA available: {torch.cuda.is_available()}")
+
+# Enable fast parallel downloads
+os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
+
+
+def _pip_install(packages):
+    """Install packages at runtime."""
+    cmd = [sys.executable, "-m", "pip", "install", "--no-cache-dir"] + packages
+    print(f"[pip] Installing: {' '.join(packages[:5])}{'...' if len(packages) > 5 else ''}")
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"[pip] ERROR: {result.stderr[-500:]}")
+        raise RuntimeError(f"pip install failed: {result.stderr[-200:]}")
+    print(f"[pip] Done")
+
+
+def _install_deps():
+    """Install all dependencies needed for LongCat."""
+    _pip_install([
+        "numpy==1.26.4",
+        "transformers==4.41.0",
+        "diffusers==0.35.1",
+        "safetensors==0.5.3",
+        "loguru==0.7.2",
+        "einops==0.8.0",
+        "ftfy==6.2.0",
+        "imageio==2.37.0",
+        "imageio-ffmpeg==0.6.0",
+        "scipy==1.15.3",
+        "soundfile==0.13.1",
+        "librosa==0.11.0",
+        "regex==2024.11.6",
+        "huggingface_hub==0.34.0",
+        "accelerate==1.7.0",
+        "hf_transfer==0.1.9",
+        "Pillow",
+    ])
+
+
+def _install_flash_attn():
+    """Install flash-attn (takes 5-10 min to compile)."""
+    _pip_install(["flash-attn==2.7.4.post1", "--no-build-isolation"])
+
 
 # ---------------------------------------------------------------------------
 # Single-process distributed init shim
@@ -38,6 +72,9 @@ print(f"[startup] Files: {os.listdir('/src')}")
 
 def _init_single_process_distributed():
     """Initialize a single-process distributed environment for Cog."""
+    import datetime
+    import torch.distributed as dist
+    
     os.environ.setdefault("RANK", "0")
     os.environ.setdefault("WORLD_SIZE", "1")
     os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
@@ -106,6 +143,24 @@ def _download_whisper():
 class Predictor:
     def setup(self):
         """Load models into GPU memory. Called once at container start."""
+        t_start = time.time()
+        
+        # Install dependencies first
+        print("[setup] Installing Python dependencies...")
+        t0 = time.time()
+        _install_deps()
+        print(f"[setup] Dependencies installed ({time.time()-t0:.1f}s)")
+        
+        # Install flash-attn (needed for DiT attention)
+        print("[setup] Installing flash-attn (compiling from source)...")
+        t0 = time.time()
+        _install_flash_attn()
+        print(f"[setup] flash-attn installed ({time.time()-t0:.1f}s)")
+        
+        # Now import everything
+        import numpy as np
+        import PIL.Image
+        import librosa
         from transformers import AutoTokenizer, UMT5EncoderModel
         from longcat_video.pipeline_longcat_video_avatar import LongCatVideoAvatarPipeline
         from longcat_video.modules.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
@@ -113,8 +168,6 @@ class Predictor:
         from longcat_video.modules.avatar.longcat_video_dit_avatar import LongCatVideoAvatarTransformer3DModel
         from longcat_video.modules.quantization import load_quantized_dit
         from longcat_video.context_parallel import context_parallel_util
-        
-        t_start = time.time()
         
         # Initialize single-process distributed
         _init_single_process_distributed()
@@ -127,12 +180,12 @@ class Predictor:
         )
         
         # Download models (uses HF cache — fast on subsequent runs)
-        print("[setup] Downloading/loading avatar model...")
+        print("[setup] Downloading avatar model...")
         t0 = time.time()
         avatar_dir = _download_avatar_model()
         print(f"[setup] Avatar model ready ({time.time()-t0:.1f}s)")
         
-        print("[setup] Downloading/loading base model...")
+        print("[setup] Downloading base model (text_encoder, VAE, tokenizer)...")
         t0 = time.time()
         base_dir = _download_base_model()
         print(f"[setup] Base model ready ({time.time()-t0:.1f}s)")
@@ -173,7 +226,6 @@ class Predictor:
         print(f"[setup] DiT loaded ({time.time()-t0:.1f}s)")
         
         print("[setup] Loading DMD distillation LoRA...")
-        distill_path = str(Path(avatar_dir) / "lora" / "dmd_lora.safetensors")
         
         print("[setup] Building pipeline...")
         self.pipeline = LongCatVideoAvatarPipeline(
@@ -246,6 +298,8 @@ class Predictor:
         Returns:
             URL to the generated video
         """
+        import numpy as np
+        
         # Lazy load whisper if audio is provided
         if audio:
             self._ensure_whisper()
@@ -299,8 +353,9 @@ class Predictor:
         output_path = self._save_video(video, fps)
         return output_path
     
-    def _load_image(self, image_url: str) -> PIL.Image.Image:
+    def _load_image(self, image_url: str):
         """Load and preprocess a reference image."""
+        import PIL.Image
         import requests
         from io import BytesIO
         
@@ -312,10 +367,11 @@ class Predictor:
         
         return img.convert("RGB")
     
-    def _process_audio(self, audio_url: str) -> torch.Tensor:
+    def _process_audio(self, audio_url: str):
         """Process audio file into embeddings."""
         import requests
         from io import BytesIO
+        import librosa
         
         # Download audio
         if audio_url.startswith(("http://", "https://")):
@@ -340,8 +396,10 @@ class Predictor:
         
         return audio_emb
     
-    def _save_video(self, video: torch.Tensor, fps: int) -> str:
+    def _save_video(self, video, fps: int) -> str:
         """Save video tensor to file."""
+        import tempfile
+        import numpy as np
         import imageio
         
         output_path = tempfile.mktemp(suffix=".mp4")
