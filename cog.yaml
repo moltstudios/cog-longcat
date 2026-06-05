@@ -1,6 +1,7 @@
-# LongCat-Video-Avatar-1.5 — Minimal image, runtime dep install
-# Image: ~5GB (CUDA base + torch only)
-# All other deps installed during setup() via pip
+# LongCat-Video-Avatar-1.5 — Fully baked image
+# ALL deps + ALL models baked into Docker image at build time.
+# Build on a cloud x86_64 VM with 150GB+ disk, NOT on ARM Mac or CI runner.
+# setup() only loads models from local disk — zero downloads at runtime.
 
 build:
   gpu: true
@@ -8,8 +9,40 @@ build:
     - "libgl1"
     - "libglib2.0-0"
     - "ffmpeg"
+    - "git"
+    - "wget"
   python_version: "3.12"
   python_packages:
     - "torch==2.6.0"
+    - "numpy==1.26.4"
+    - "transformers==4.41.0"
+    - "diffusers==0.35.1"
+    - "safetensors==0.5.3"
+    - "loguru==0.7.2"
+    - "einops==0.8.0"
+    - "ftfy==6.2.0"
+    - "imageio==2.37.0"
+    - "imageio-ffmpeg==0.6.0"
+    - "scipy==1.15.3"
+    - "soundfile==0.13.1"
+    - "librosa==0.11.0"
+    - "regex==2024.11.6"
+    - "huggingface_hub==0.34.0"
+    - "accelerate==1.7.0"
+    - "Pillow"
+    - "requests"
+  run:
+    # Prebuilt flash-attn wheel — NO source compilation needed
+    # Exact match: flash_attn 2.7.4.post1, CUDA 12.6, PyTorch 2.6, Python 3.12, linux_x86_64
+    - pip install "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.7.16/flash_attn-2.7.4%2Bcu126torch2.6-cp312-cp312-linux_x86_64.whl"
+    # Download LongCat base model (text_encoder, VAE, tokenizer) — ~12GB
+    - HF_HUB_ENABLE_HF_TRANSFER=1 python3 -c "from huggingface_hub import snapshot_download; snapshot_download('meituan-longcat/LongCat-Video', local_dir='/opt/models/LongCat-Video', allow_patterns=['text_encoder/*','vae/*','tokenizer/*','scheduler/*','config.json','model_index.json']); import shutil; shutil.rmtree('/root/.cache/huggingface', ignore_errors=True)"
+    # Download LongCat-Video-Avatar-1.5 (INT8 DiT + DMD LoRA + configs) — ~10GB
+    - HF_HUB_ENABLE_HF_TRANSFER=1 python3 -c "from huggingface_hub import snapshot_download; snapshot_download('meituan-longcat/LongCat-Video-Avatar-1.5', local_dir='/opt/models/LongCat-Video-Avatar-1.5', ignore_patterns=['vocal_separator/*']); import shutil; shutil.rmtree('/root/.cache/huggingface', ignore_errors=True)"
+    # Download Whisper-large-v3 — ~3GB
+    - HF_HUB_ENABLE_HF_TRANSFER=1 python3 -c "from huggingface_hub import snapshot_download; snapshot_download('openai/whisper-large-v3', local_dir='/opt/models/whisper-large-v3', allow_patterns=['model.safetensors','config.json','*.json','merges.txt','vocab.json']); import shutil; shutil.rmtree('/root/.cache/huggingface', ignore_errors=True)"
+    # Clean up pip cache
+    - pip cache purge
+    - rm -rf /tmp/* /var/tmp/*
 
 run: "predict.py:Predictor"

@@ -1,86 +1,55 @@
 """
 LongCat-Video-Avatar-1.5 — Cog Predictor for Replicate
 
-Single-GPU deployment (A100 80GB) using INT8 quantized DiT + 8-step DMD distillation.
-Supports: Audio-Image-to-Video (AI2V), Audio-Text-to-Video (AT2V), Video Continuation.
+Fully baked image: ALL deps and models in Docker image.
+setup() only loads from /opt/models/ — zero runtime downloads.
 
-Adapted from: https://github.com/meituan-longcat/LongCat-Video
+Single-GPU (A100 80GB) using INT8 quantized DiT + 8-step DMD distillation.
+Supports: Audio-Image-to-Video (AI2V), Audio-Text-to-Video (AT2V).
+
+Source: https://github.com/meituan-longcat/LongCat-Video
+License: MIT
 """
 
 import os
 import sys
-import json
 import time
-import subprocess
+import tempfile
+import datetime
 from pathlib import Path
 from typing import Optional
 
 import torch
+import torch.distributed as dist
+import numpy as np
+import PIL.Image
+import imageio
+import requests
+import librosa
+from io import BytesIO
 
-# Print startup diagnostics
-print(f"[startup] Python: {sys.version}")
-print(f"[startup] CWD: {os.getcwd()}")
-print(f"[startup] PyTorch: {torch.__version__}")
-print(f"[startup] CUDA available: {torch.cuda.is_available()}")
-
-# Enable fast parallel downloads
+# Enable HF transfer for any incidental downloads
 os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
 
+print(f"[startup] Python: {sys.version}")
+print(f"[startup] PyTorch: {torch.__version__}, CUDA: {torch.cuda.is_available()}")
 
-def _pip_install(packages):
-    """Install packages at runtime."""
-    cmd = [sys.executable, "-m", "pip", "install", "--no-cache-dir"] + packages
-    print(f"[pip] Installing: {' '.join(packages[:5])}{'...' if len(packages) > 5 else ''}")
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        print(f"[pip] ERROR: {result.stderr[-500:]}")
-        raise RuntimeError(f"pip install failed: {result.stderr[-200:]}")
-    print(f"[pip] Done")
-
-
-def _install_deps():
-    """Install all dependencies needed for LongCat."""
-    _pip_install([
-        "numpy==1.26.4",
-        "transformers==4.41.0",
-        "diffusers==0.35.1",
-        "safetensors==0.5.3",
-        "loguru==0.7.2",
-        "einops==0.8.0",
-        "ftfy==6.2.0",
-        "imageio==2.37.0",
-        "imageio-ffmpeg==0.6.0",
-        "scipy==1.15.3",
-        "soundfile==0.13.1",
-        "librosa==0.11.0",
-        "regex==2024.11.6",
-        "huggingface_hub==0.34.0",
-        "accelerate==1.7.0",
-        "hf_transfer==0.1.9",
-        "Pillow",
-    ])
-
-
-def _install_flash_attn():
-    """Install flash-attn (takes 5-10 min to compile)."""
-    _pip_install(["flash-attn==2.7.4.post1", "--no-build-isolation"])
+MODELS_DIR = Path("/opt/models")
+AVATAR_DIR = MODELS_DIR / "LongCat-Video-Avatar-1.5"
+BASE_DIR = MODELS_DIR / "LongCat-Video"
+WHISPER_DIR = MODELS_DIR / "whisper-large-v3"
 
 
 # ---------------------------------------------------------------------------
-# Single-process distributed init shim
+# Single-process distributed init (LongCat requires dist even for 1 GPU)
 # ---------------------------------------------------------------------------
 
-def _init_single_process_distributed():
-    """Initialize a single-process distributed environment for Cog."""
-    import datetime
-    import torch.distributed as dist
-    
+def _init_distributed():
     os.environ.setdefault("RANK", "0")
     os.environ.setdefault("WORLD_SIZE", "1")
     os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
     os.environ.setdefault("MASTER_PORT", "29500")
     os.environ.setdefault("LOCAL_RANK", "0")
-    
     if not dist.is_initialized():
         dist.init_process_group(
             backend="gloo",
@@ -92,141 +61,79 @@ def _init_single_process_distributed():
 
 
 # ---------------------------------------------------------------------------
-# Model download with caching
-# ---------------------------------------------------------------------------
-
-def _download_avatar_model():
-    """Download LongCat-Video-Avatar-1.5 (INT8 + LoRA + configs only)."""
-    from huggingface_hub import snapshot_download
-    
-    return snapshot_download(
-        "meituan-longcat/LongCat-Video-Avatar-1.5",
-        allow_patterns=[
-            "base_model_int8/*",
-            "lora/*",
-            "scheduler/*",
-            "config.json",
-            "model_index.json",
-        ],
-    )
-
-
-def _download_base_model():
-    """Download LongCat-Video base (text_encoder, vae, tokenizer)."""
-    from huggingface_hub import snapshot_download
-    
-    return snapshot_download(
-        "meituan-longcat/LongCat-Video",
-        allow_patterns=[
-            "text_encoder/*",
-            "vae/*",
-            "tokenizer/*",
-            "scheduler/*",
-        ],
-    )
-
-
-def _download_whisper():
-    """Download Whisper-large-v3 (only when audio input is provided)."""
-    from huggingface_hub import snapshot_download
-    
-    return snapshot_download(
-        "openai/whisper-large-v3",
-        allow_patterns=["model.safetensors", "config.json", "*.json", "merges.txt", "vocab.json"],
-    )
-
-
-# ---------------------------------------------------------------------------
 # Cog Predictor
 # ---------------------------------------------------------------------------
 
 class Predictor:
     def setup(self):
-        """Load models into GPU memory. Called once at container start."""
+        """Load all models from local disk. Called once at container start."""
         t_start = time.time()
-        
-        # Install dependencies first
-        print("[setup] Installing Python dependencies...")
-        t0 = time.time()
-        _install_deps()
-        print(f"[setup] Dependencies installed ({time.time()-t0:.1f}s)")
-        
-        # Install flash-attn (needed for DiT attention)
-        print("[setup] Installing flash-attn (compiling from source)...")
-        t0 = time.time()
-        _install_flash_attn()
-        print(f"[setup] flash-attn installed ({time.time()-t0:.1f}s)")
-        
-        # Now import everything
-        import numpy as np
-        import PIL.Image
-        import librosa
-        from transformers import AutoTokenizer, UMT5EncoderModel
+
+        # Verify baked models exist
+        assert AVATAR_DIR.exists(), f"Avatar model not found at {AVATAR_DIR}"
+        assert BASE_DIR.exists(), f"Base model not found at {BASE_DIR}"
+        assert WHISPER_DIR.exists(), f"Whisper not found at {WHISPER_DIR}"
+        print("[setup] All model directories found ✓")
+
+        # Init distributed (required by LongCat)
+        _init_distributed()
+
+        # Import LongCat modules (all deps baked into image)
         from longcat_video.pipeline_longcat_video_avatar import LongCatVideoAvatarPipeline
         from longcat_video.modules.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
         from longcat_video.modules.autoencoder_kl_wan import AutoencoderKLWan
         from longcat_video.modules.avatar.longcat_video_dit_avatar import LongCatVideoAvatarTransformer3DModel
         from longcat_video.modules.quantization import load_quantized_dit
         from longcat_video.context_parallel import context_parallel_util
-        
-        # Initialize single-process distributed
-        _init_single_process_distributed()
-        
-        # Initialize context parallel for single GPU
+        from transformers import AutoTokenizer, UMT5EncoderModel, WhisperModel, WhisperFeatureExtractor
+
+        # Init context parallel for single GPU
         context_parallel_util.init_context_parallel(
             context_parallel_size=1,
             global_rank=0,
             world_size=1,
         )
-        
-        # Download models (uses HF cache — fast on subsequent runs)
-        print("[setup] Downloading avatar model...")
-        t0 = time.time()
-        avatar_dir = _download_avatar_model()
-        print(f"[setup] Avatar model ready ({time.time()-t0:.1f}s)")
-        
-        print("[setup] Downloading base model (text_encoder, VAE, tokenizer)...")
-        t0 = time.time()
-        base_dir = _download_base_model()
-        print(f"[setup] Base model ready ({time.time()-t0:.1f}s)")
-        
+
         device = torch.device("cuda:0")
         dtype = torch.bfloat16
-        
+
+        # Load tokenizer
         print("[setup] Loading tokenizer...")
         tokenizer = AutoTokenizer.from_pretrained(
-            str(base_dir), subfolder="tokenizer", torch_dtype=dtype
+            str(BASE_DIR), subfolder="tokenizer", torch_dtype=dtype
         )
-        
+
+        # Load UMT5 text encoder (~10GB)
         print("[setup] Loading UMT5 text encoder...")
         t0 = time.time()
         text_encoder = UMT5EncoderModel.from_pretrained(
-            str(base_dir), subfolder="text_encoder", torch_dtype=dtype
+            str(BASE_DIR), subfolder="text_encoder", torch_dtype=dtype
         ).to(device)
         print(f"[setup] Text encoder loaded ({time.time()-t0:.1f}s)")
-        
+
+        # Load VAE
         print("[setup] Loading VAE...")
         vae = AutoencoderKLWan.from_pretrained(
-            str(base_dir), subfolder="vae", torch_dtype=dtype
+            str(BASE_DIR), subfolder="vae", torch_dtype=dtype
         ).to(device)
-        
-        print("[setup] Loading scheduler...")
+
+        # Load scheduler
         scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
-            str(avatar_dir), subfolder="scheduler", torch_dtype=dtype
+            str(AVATAR_DIR), subfolder="scheduler", torch_dtype=dtype
         )
-        
-        print("[setup] Loading INT8 DiT model...")
+
+        # Load INT8 quantized DiT (~8GB)
+        print("[setup] Loading INT8 DiT...")
         t0 = time.time()
         cp_split_hw = context_parallel_util.get_optimal_split(1)
         dit = load_quantized_dit(
-            str(avatar_dir),
+            str(AVATAR_DIR),
             subfolder="base_model_int8",
             cp_split_hw=cp_split_hw,
         ).to(device)
         print(f"[setup] DiT loaded ({time.time()-t0:.1f}s)")
-        
-        print("[setup] Loading DMD distillation LoRA...")
-        
+
+        # Build pipeline
         print("[setup] Building pipeline...")
         self.pipeline = LongCatVideoAvatarPipeline(
             tokenizer=tokenizer,
@@ -235,39 +142,29 @@ class Predictor:
             transformer=dit,
             scheduler=scheduler,
         )
-        
-        # Load LoRA weights
-        self.pipeline.load_lora_weights(str(Path(avatar_dir) / "lora"), weight_name="dmd_lora.safetensors")
+
+        # Load DMD distillation LoRA and fuse
+        print("[setup] Loading DMD LoRA...")
+        lora_path = str(Path(AVATAR_DIR) / "lora")
+        self.pipeline.load_lora_weights(lora_path, weight_name="dmd_lora.safetensors")
         self.pipeline.fuse_lora()
-        print("[setup] LoRA fused")
-        
+        print("[setup] LoRA fused ✓")
+
         self.pipeline = self.pipeline.to(device)
         self.device = device
         self.dtype = dtype
-        self.avatar_dir = avatar_dir
-        
-        # Whisper loaded lazily when audio input is provided
-        self._whisper_loaded = False
-        self._audio_encoder = None
-        self._audio_feature_extractor = None
-        
-        print(f"[setup] Complete in {time.time()-t_start:.1f}s")
-    
-    def _ensure_whisper(self):
-        """Load Whisper model lazily (only when audio input is provided)."""
-        if self._whisper_loaded:
-            return
-        
-        from longcat_video.audio_process import get_audio_encoder, get_audio_feature_extractor
-        
-        print("[setup] Loading Whisper-large-v3 (lazy, audio input detected)...")
+
+        # Load Whisper-large-v3 (for audio processing)
+        print("[setup] Loading Whisper-large-v3...")
         t0 = time.time()
-        whisper_dir = _download_whisper()
-        self._audio_encoder = get_audio_encoder(whisper_dir, device=self.device)
-        self._audio_feature_extractor = get_audio_feature_extractor(whisper_dir)
-        self._whisper_loaded = True
+        self.audio_encoder = WhisperModel.from_pretrained(
+            str(WHISPER_DIR), torch_dtype=dtype
+        ).to(device)
+        self.audio_feature_extractor = WhisperFeatureExtractor.from_pretrained(str(WHISPER_DIR))
         print(f"[setup] Whisper loaded ({time.time()-t0:.1f}s)")
-    
+
+        print(f"[setup] Complete in {time.time()-t_start:.1f}s ✓")
+
     def predict(
         self,
         prompt: str = "A person is speaking naturally with expressive facial movements",
@@ -282,57 +179,47 @@ class Predictor:
         fps: int = 16,
     ) -> str:
         """Generate a talking avatar video.
-        
+
         Args:
             prompt: Text prompt describing the video content
-            image: Reference face image URL (for AI2V mode)
+            image: Reference face image URL or path (for AI2V mode)
             audio: Audio file URL for lip sync (enables audio-driven generation)
-            resolution: Output resolution - "480p" or "720p"
-            num_frames: Number of frames to generate (max 81 for 480p)
-            text_guidance_scale: CFG scale for text conditioning (1.0-10.0)
-            audio_guidance_scale: CFG scale for audio conditioning (1.0-10.0)
-            num_inference_steps: Number of denoising steps (default: 8 for DMD)
+            resolution: Output resolution — "480p" or "720p"
+            num_frames: Number of frames (max 81 for 480p, 49 for 720p)
+            text_guidance_scale: Text CFG scale (1.0-10.0, default 4.0)
+            audio_guidance_scale: Audio CFG scale (1.0-10.0, default 4.0)
+            num_inference_steps: Denoising steps (default 8 for DMD distillation)
             seed: Random seed (-1 for random)
-            fps: Output video FPS
-        
+            fps: Output video FPS (default 16)
+
         Returns:
-            URL to the generated video
+            Path to generated MP4 video
         """
-        import numpy as np
-        
-        # Lazy load whisper if audio is provided
-        if audio:
-            self._ensure_whisper()
-        
         # Set seed
         if seed >= 0:
             torch.manual_seed(seed)
             generator = torch.Generator(device=self.device).manual_seed(seed)
         else:
             generator = None
-        
+
         # Resolution mapping
-        res_map = {
-            "480p": (480, 854),
-            "720p": (720, 1280),
-            "1080p": (1080, 1920),
-        }
+        res_map = {"480p": (480, 854), "720p": (720, 1280)}
         height, width = res_map.get(resolution, (480, 854))
-        
+
         # Load reference image
         ref_image = None
         if image:
             ref_image = self._load_image(image)
-        
+
         # Process audio
         audio_emb = None
         if audio:
             audio_emb = self._process_audio(audio)
-        
+
         print(f"[predict] Generating {num_frames} frames at {width}x{height}...")
         t0 = time.time()
-        
-        with torch.inference_mode():
+
+        with torch.no_grad():
             result = self.pipeline(
                 prompt=prompt,
                 image=ref_image,
@@ -345,71 +232,62 @@ class Predictor:
                 audio_guidance_scale=audio_guidance_scale,
                 generator=generator,
             )
-        
+
         video = result.videos[0]  # [C, T, H, W]
         print(f"[predict] Generated in {time.time()-t0:.1f}s")
-        
+
         # Save video
         output_path = self._save_video(video, fps)
         return output_path
-    
+
     def _load_image(self, image_url: str):
         """Load and preprocess a reference image."""
-        import PIL.Image
-        import requests
-        from io import BytesIO
-        
         if image_url.startswith(("http://", "https://")):
             resp = requests.get(image_url, timeout=30)
             img = PIL.Image.open(BytesIO(resp.content))
         else:
             img = PIL.Image.open(image_url)
-        
         return img.convert("RGB")
-    
+
     def _process_audio(self, audio_url: str):
-        """Process audio file into embeddings."""
-        import requests
-        from io import BytesIO
-        import librosa
-        
-        # Download audio
+        """Process audio file into embeddings using Whisper."""
         if audio_url.startswith(("http://", "https://")):
             resp = requests.get(audio_url, timeout=60)
             audio_bytes = BytesIO(resp.content)
         else:
             audio_bytes = open(audio_url, "rb")
-        
-        # Load and resample audio
-        waveform, sr = librosa.load(audio_bytes, sr=16000, mono=True)
-        waveform = torch.tensor(waveform).unsqueeze(0)  # [1, T]
-        
-        # Extract audio features using Whisper
-        inputs = self._audio_feature_extractor(
-            waveform.squeeze().numpy(), 
-            sampling_rate=16000, 
-            return_tensors="pt"
-        )
-        audio_emb = self._audio_encoder(
-            inputs.input_features.to(self.device, dtype=self.dtype)
-        )
-        
-        return audio_emb
-    
+
+        try:
+            waveform, sr = librosa.load(audio_bytes, sr=16000, mono=True)
+            waveform = torch.tensor(waveform).unsqueeze(0)
+
+            inputs = self.audio_feature_extractor(
+                waveform.squeeze().numpy(),
+                sampling_rate=16000,
+                return_tensors="pt"
+            )
+
+            with torch.no_grad():
+                encoder_output = self.audio_encoder.encoder(
+                    inputs.input_features.to(self.device, dtype=self.dtype)
+                )
+                audio_emb = encoder_output.last_hidden_state
+
+            return audio_emb
+        finally:
+            if hasattr(audio_bytes, 'close'):
+                audio_bytes.close()
+
     def _save_video(self, video, fps: int) -> str:
-        """Save video tensor to file."""
-        import tempfile
-        import numpy as np
-        import imageio
-        
+        """Save video tensor to MP4 file."""
         output_path = tempfile.mktemp(suffix=".mp4")
-        
+
         # [C, T, H, W] → [T, H, W, C]
         frames = (video.permute(1, 2, 3, 0).cpu().float().numpy() * 255).astype(np.uint8)
-        
+
         writer = imageio.get_writer(output_path, fps=fps, codec="libx264", quality=8)
         for frame in frames:
             writer.append_data(frame)
         writer.close()
-        
+
         return output_path
