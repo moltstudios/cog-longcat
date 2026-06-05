@@ -3,8 +3,29 @@ build:
   system_packages:
     - "libgl1"
     - "libglib2.0-0"
+    - "ffmpeg"
   python_version: "3.12"
   python_packages:
     - "torch==2.6.0"
+    - "torchvision==0.21.0"
+    - "torchaudio==2.6.0"
+    - "numpy==1.26.4"
+    - "transformers==4.41.0"
+    - "diffusers==0.35.1"
+    - "safetensors==0.5.3"
+    - "loguru==0.7.2"
+    - "einops==0.8.0"
+    - "ftfy==6.2.0"
+    - "imageio==2.37.0"
+    - "imageio-ffmpeg==0.6.0"
+    - "scipy==1.15.3"
+    - "soundfile==0.13.1"
+    - "librosa==0.11.0"
+    - "regex==2024.11.6"
+    - "huggingface_hub==0.34.0"
+    - "accelerate==1.7.0"
+    - "hf_transfer==0.1.16"
+  run:
+    - pip install flash-attn==2.7.4.post1 --no-build-isolation
 
 run: "predict.py:Predictor"
